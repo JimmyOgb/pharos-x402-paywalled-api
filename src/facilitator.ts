@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { createWalletClient, http, publicActions, getAddress, verifyTypedData, defineChain, Hex } from "viem";
-import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import { privateKeyToAccount, generatePrivateKey, PrivateKeyAccount } from "viem/accounts";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { ExactEvmScheme as FacilitatorScheme } from "@x402/evm/exact/facilitator";
 import { toFacilitatorEvmSigner, authorizationTypes } from "@x402/evm";
@@ -14,7 +14,7 @@ export const viemPublicClient = createWalletClient({
 }).extend(publicActions);
 
 // Get or create facilitator settlement account
-let facilitatorAccount;
+let facilitatorAccount: PrivateKeyAccount;
 if (CONFIG.FACILITATOR_PRIVATE_KEY && CONFIG.FACILITATOR_PRIVATE_KEY.startsWith("0x")) {
   facilitatorAccount = privateKeyToAccount(CONFIG.FACILITATOR_PRIVATE_KEY);
 } else {
@@ -28,12 +28,12 @@ export const facilitatorWalletClient = createWalletClient({
   transport: http(CONFIG.RPC_URL),
 }).extend(publicActions);
 
-export const facilitatorSigner = toFacilitatorEvmSigner(facilitatorWalletClient);
+export const facilitatorSigner = toFacilitatorEvmSigner(facilitatorWalletClient as any);
 
 // Core x402 facilitator instance
 export const coreFacilitator = new x402Facilitator();
 export const facilitatorExactEvmScheme = new FacilitatorScheme(facilitatorSigner);
-coreFacilitator.register(CONFIG.NETWORK_ID, facilitatorExactEvmScheme);
+coreFacilitator.register(CONFIG.NETWORK_ID as `${string}:${string}`, facilitatorExactEvmScheme);
 
 // Facilitator implementation class
 export class PharosFacilitator {
