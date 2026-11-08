@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { CONFIG } from "./config.js";
 import { PharosFacilitator } from "./facilitator.js";
+import { DASHBOARD_HTML } from "./dashboardHtml.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +39,12 @@ export function createApp() {
   // Static Assets for Web UI
   const publicDir = path.join(__dirname, "..", "public");
   app.use(express.static(publicDir));
+
+  // Dashboard Route
+  app.get("/", (req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(DASHBOARD_HTML);
+  });
 
   // ==========================================
   // 1. FREE ROUTE (Requirement 02)
