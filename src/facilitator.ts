@@ -249,8 +249,37 @@ export class PharosFacilitator {
         timeout: 30000,
       });
 
+      if (receipt.status !== "success") {
+        return {
+          success: false,
+          state: "SETTLEMENT_FAILED",
+          error: "On-chain transaction reverted during execution on Atlantic Testnet",
+          txHash: hash,
+          blockNumber: receipt.blockNumber.toString(),
+        };
+      }
+
+      // Verify USDC Transfer event in logs
+      const usdcTransfer = receipt.logs.find((log) => {
+        return (
+          log.address.toLowerCase() === CONFIG.USDC_ADDRESS.toLowerCase() &&
+          log.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        );
+      });
+
+      if (!usdcTransfer) {
+        return {
+          success: false,
+          state: "SETTLEMENT_UNVERIFIED",
+          error: "Transaction mined but no USDC Transfer event was detected in logs",
+          txHash: hash,
+          blockNumber: receipt.blockNumber.toString(),
+        };
+      }
+
       return {
         success: true,
+        state: "SETTLED",
         txHash: hash,
         blockNumber: receipt.blockNumber.toString(),
         network: CONFIG.NETWORK_ID,
@@ -259,9 +288,68 @@ export class PharosFacilitator {
     } catch (err: any) {
       return {
         success: false,
-        error: "On-chain settlement reverted or failed",
+        state: "SETTLEMENT_FAILED",
+        error: "On-chain settlement reverted or failed to broadcast",
         invalidReason: err.message || "settlement_execution_failed",
       };
+    }
+  }
+
+  /**
+   * Independent read-only verification of an existing on-chain transaction hash on Atlantic Testnet
+   */
+  static async verifyOnChainReceipt(txHash: string, expectedTo?: string, expectedAmount?: bigint) {
+    if (!txHash || typeof txHash !== "string" || !txHash.startsWith("0x") || txHash.length !== 66) {
+      return { verified: false, state: "INVALID_HASH_FORMAT", reason: "Hash must be 32 bytes (0x + 64 hex characters)" };
+    }
+    try {
+      const receipt = await viemPublicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
+      if (!receipt) {
+        return { verified: false, state: "NOT_FOUND", reason: "Transaction receipt not found on chain ID 688689" };
+      }
+      if (receipt.status !== "success") {
+        return { verified: false, state: "TRANSACTION_FAILED", reason: "Transaction execution reverted on-chain" };
+      }
+
+      const usdcTransfer = receipt.logs.find((log) => {
+        return (
+          log.address.toLowerCase() === CONFIG.USDC_ADDRESS.toLowerCase() &&
+          log.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        );
+      });
+
+      if (!usdcTransfer) {
+        return { verified: false, state: "NO_TRANSFER_EVENT", reason: "No USDC Transfer event found in transaction logs" };
+      }
+
+      const toTopic = usdcTransfer.topics[2];
+      const actualTo = toTopic ? `0x${toTopic.slice(26)}`.toLowerCase() : "";
+      const actualAmount = usdcTransfer.data ? BigInt(usdcTransfer.data) : 0n;
+
+      if (expectedTo && actualTo !== expectedTo.toLowerCase()) {
+        return { verified: false, state: "WRONG_RECIPIENT", reason: `Expected recipient ${expectedTo}, got ${actualTo}` };
+      }
+      if (expectedAmount && actualAmount < expectedAmount) {
+        return { verified: false, state: "UNDERPAID", reason: `Expected at least ${expectedAmount}, got ${actualAmount}` };
+      }
+
+      return {
+        verified: true,
+        state: "CONFIRMED_ONCHAIN_SETTLEMENT",
+        blockNumber: receipt.blockNumber.toString(),
+        txHash,
+        actualTo,
+        actualAmount: actualAmount.toString(),
+      };
+    } catch (err: any) {
+      if (
+        err.name === "TransactionReceiptNotFoundError" ||
+        err.message?.includes("could not be found") ||
+        err.message?.includes("not found")
+      ) {
+        return { verified: false, state: "NOT_FOUND", reason: "Transaction receipt not found on chain ID 688689" };
+      }
+      return { verified: false, state: "LOOKUP_FAILED", reason: err.message };
     }
   }
 
@@ -284,5 +372,11 @@ export class PharosFacilitator {
     } else {
       res.json(result);
     }
+  }
+
+  static async handleVerifyReceipt(req: Request, res: Response) {
+    const txHash = (req.query.txHash || req.body?.txHash || "") as string;
+    const result = await PharosFacilitator.verifyOnChainReceipt(txHash);
+    res.json(result);
   }
 }

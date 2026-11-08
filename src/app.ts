@@ -110,6 +110,7 @@ export function createApp() {
   app.get("/supported", PharosFacilitator.handleGetSupported);
   app.post("/verify", PharosFacilitator.handleVerify);
   app.post("/settle", PharosFacilitator.handleSettle);
+  app.get("/verify-receipt", PharosFacilitator.handleVerifyReceipt);
 
   // ==========================================
   // 4. x402 PAYMENT GATEWAY MIDDLEWARE HELPER
@@ -153,6 +154,7 @@ export function createApp() {
         res.status(402).json({
           error: "Payment Required",
           statusCode: 402,
+          state: "PAYMENT_REQUIRED",
           message: `Access to this protected route requires payment of ${priceUsd} test USDC on Pharos Atlantic Testnet.`,
           requirements: paymentRequiredObject,
         });
@@ -172,6 +174,7 @@ export function createApp() {
           res.status(402).json({
             error: "Payment Rejected",
             statusCode: 402,
+            state: "AUTHORIZATION_FAILED",
             reason: "malformed_payment_header",
             message: "Unable to parse base64 or JSON payment signature header.",
           });
@@ -190,37 +193,50 @@ export function createApp() {
       if (!verifyResult.isValid) {
         res.setHeader("PAYMENT-REQUIRED", encodedRequirements);
         res.status(402).json({
-          error: "Payment Rejected",
+          error: "Payment Authorization Rejected",
           statusCode: 402,
+          state: "AUTHORIZATION_FAILED",
           reason: verifyResult.invalidReason,
           details: verifyResult,
-          message: `The submitted payment authorization was rejected by the facilitator: ${verifyResult.invalidReason}`,
+          message: `The submitted payment authorization was rejected: ${verifyResult.invalidReason}`,
         });
         return;
       }
 
       // 5. Attempt Settlement on Pharos Atlantic Testnet
-      let settlementResult = await PharosFacilitator.settlePayment(paymentPayload, requirements);
+      // Honest x402 enforcement: NEVER manufacture a transaction hash from a signature!
+      const settlementResult = await PharosFacilitator.settlePayment(paymentPayload, requirements);
 
-      let txHash: string;
-      if (settlementResult.success && settlementResult.txHash) {
-        txHash = settlementResult.txHash;
-      } else {
-        // Fallback or test-mode verification receipt:
-        // When running in environment without live fund balance or in test mode,
-        // compute deterministic transaction hash reference based on signature nonce
-        const nonce = paymentPayload.payload?.authorization?.nonce || "0x123";
-        txHash = (paymentPayload.payload?.signature?.slice(0, 66) || "0x00") as string;
+      if (!settlementResult.success || !settlementResult.txHash) {
+        res.setHeader("PAYMENT-REQUIRED", encodedRequirements);
+        res.status(402).json({
+          error: "Settlement Unverified",
+          statusCode: 402,
+          state: (settlementResult as any).state || "SETTLEMENT_FAILED",
+          message: "Payment authorization was cryptographically verified, but on-chain settlement on Atlantic Testnet could not be confirmed. A cryptographic signature is authorization evidence, not a confirmed on-chain transaction. Paid data withheld.",
+          details: {
+            signatureVerified: true,
+            payer: verifyResult.payer,
+            facilitatorError: settlementResult.error,
+            invalidReason: (settlementResult as any).invalidReason,
+            onChainReceiptRequired: true,
+            chain: CONFIG.CHAIN_ID,
+          },
+        });
+        return;
       }
 
+      // 6. Only verified on-chain settlements proceed to resource delivery
       const paymentResponseObject = {
         success: true,
+        state: "SETTLED",
         x402Version: 2,
         network: CONFIG.NETWORK_ID,
-        txHash: txHash,
+        txHash: settlementResult.txHash,
+        blockNumber: settlementResult.blockNumber,
         settledAmount: priceUnits,
         payer: verifyResult.payer,
-        explorerUrl: `${CONFIG.EXPLORER_URL}/tx/${txHash}`,
+        explorerUrl: `${CONFIG.EXPLORER_URL}/tx/${settlementResult.txHash}`,
       };
 
       const encodedResponse = Buffer.from(JSON.stringify(paymentResponseObject)).toString("base64");
@@ -239,8 +255,23 @@ export function createApp() {
   app.get(
     "/api/basic",
     requirePayment(CONFIG.PRICES.BASIC.units, CONFIG.PRICES.BASIC.usd, CONFIG.PRICES.BASIC.description),
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const paymentInfo = (req as any).payment;
+      
+      // Live measured telemetry from Pharos Atlantic Testnet RPC
+      let blockHeight = 0;
+      let gasPriceWei = "0";
+      const observationTimestamp = new Date().toISOString();
+      try {
+        const { viemPublicClient } = await import("./facilitator.js");
+        const blockNum = await viemPublicClient.getBlockNumber();
+        blockHeight = Number(blockNum);
+        const gasPrice = await viemPublicClient.getGasPrice();
+        gasPriceWei = gasPrice.toString();
+      } catch {
+        blockHeight = 0;
+      }
+
       res.status(200).json({
         route: "/api/basic",
         accessLevel: "BASIC",
@@ -251,13 +282,19 @@ export function createApp() {
         data: {
           metrics: {
             atlanticNetworkStatus: "ONLINE",
-            blockHeight: 32471500,
+            blockHeight: blockHeight,
             averageBlockTimeSeconds: 1.0,
-            chainTps: 4180,
-            activeValidators: 42,
+            gasPriceWei: gasPriceWei,
+            liveChainObservation: true,
           },
-          insight: "Atlantic Testnet is operating within optimal gas and finality bounds.",
-          timestamp: new Date().toISOString(),
+          provenance: {
+            source: "Pharos Atlantic Testnet RPC (https://atlantic.dplabs-internal.com)",
+            observedAt: observationTimestamp,
+            blockNumber: blockHeight,
+            methodology: "Direct eth_blockNumber and eth_gasPrice queries via public Viem client",
+          },
+          insight: "Atlantic Testnet is operational. Block height and gas price verified via live RPC.",
+          timestamp: observationTimestamp,
         },
       });
     }
@@ -271,23 +308,31 @@ export function createApp() {
     requirePayment(CONFIG.PRICES.PREMIUM.units, CONFIG.PRICES.PREMIUM.usd, CONFIG.PRICES.PREMIUM.description),
     (req: Request, res: Response) => {
       const paymentInfo = (req as any).payment;
+      const observationTimestamp = new Date().toISOString();
+
       res.status(200).json({
         route: "/api/premium",
         accessLevel: "PREMIUM",
-        tier: "Institutional",
+        tier: "Demonstration Analytics",
         pricePaid: `${CONFIG.PRICES.PREMIUM.usd} USDC (${CONFIG.PRICES.PREMIUM.units} atomic units)`,
         network: CONFIG.NETWORK_ID,
         settlement: paymentInfo,
         data: {
-          deepIntelligence: {
+          analyticsFixture: {
             orderbookLiquidityUsd: "15,820,000",
             simulatedSlippage100k: "0.0014%",
             crossDEXArbitrageOpportunities: 3,
             recommendedExecutionVenue: "Atlantic DeepPool v2",
             predictiveAlphaScore: 0.94,
           },
-          premiumForecast: "Strong liquidity expansion detected across Atlantic Testnet USDC pools.",
-          timestamp: new Date().toISOString(),
+          provenance: {
+            classification: "DEMONSTRATION_FIXTURE",
+            disclosure: "Demonstration analytics fixture for x402 payment flow verification. Simulated algorithmic intelligence, not live production market depth.",
+            observedAt: observationTimestamp,
+            referenceNetwork: "Pharos Atlantic Testnet (688689)",
+          },
+          premiumForecast: "Simulated liquidity forecast across Atlantic Testnet USDC pools for autonomous agent testing.",
+          timestamp: observationTimestamp,
         },
       });
     }
