@@ -7,6 +7,8 @@ node_modules/
 dist/
 build/
 .vercel
+raw_video/
+voiceover.mp3
 
 # Environment & Secrets (Mandatory Requirement 06)
 .env
@@ -29,3 +31,5 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+
+.vercel
